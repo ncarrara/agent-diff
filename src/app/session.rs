@@ -12,6 +12,8 @@ pub(super) enum Cmd {
     RemoveEmptyFolder(String),
     ImportFiles { folder: String, files: Vec<PathBuf> },
     MakeRemoteIdentical,
+    DeleteIgnored(String),
+    Unignore(String),
     RenameFolder { from: String, to: String, files: Vec<(String, u64, Option<Rename>)> },
     Rename { path: String, version: u64, rename: Option<Rename>, to: String },
     Sync { path: String, version: u64, origin: Origin, rename: Option<Rename> },
@@ -406,6 +408,26 @@ pub(super) fn worker(engine: Engine, rx: Receiver<Cmd>, shared: Arc<Mutex<Shared
                         }
                     });
                     last_fetch = Some(Instant::now());
+                    dirty = true;
+                }
+                Cmd::Unignore(path) => {
+                    let res = engine.remove_from_gitignore(&path);
+                    set(&|s| {
+                        s.message = Some(match &res {
+                            Ok(done) => (false, format!("{path}: no longer ignored. {done}")),
+                            Err(e) => (true, format!("{e:#}")),
+                        })
+                    });
+                    dirty = true;
+                }
+                Cmd::DeleteIgnored(path) => {
+                    let res = engine.delete_ignored(&path);
+                    set(&|s| {
+                        s.message = Some(match &res {
+                            Ok(()) => (false, format!("{path}: deleted locally")),
+                            Err(e) => (true, format!("{e:#}")),
+                        })
+                    });
                     dirty = true;
                 }
                 Cmd::MakeRemoteIdentical => {

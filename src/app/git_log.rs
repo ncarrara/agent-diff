@@ -3,6 +3,9 @@ use super::*;
 const TICK: Duration = Duration::from_secs(1);
 const SHOWN_COMMITS: &str = "400";
 const PANEL_HEIGHT: f32 = 220.0;
+const LEAST_PANEL_HEIGHT: f32 = 60.0;
+const LEAST_EXPLORER_HEIGHT: f32 = 80.0;
+const HANDLE_HEIGHT: f32 = 6.0;
 const LONGEST_INTERVAL: u64 = 3600;
 
 type Segment = (String, Option<u8>);
@@ -33,6 +36,7 @@ pub(super) struct GitLog {
     state: Arc<Mutex<LogState>>,
     poll: Arc<Mutex<GitPoll>>,
     alive: Option<Arc<()>>,
+    height: Option<f32>,
 }
 
 impl GitLog {
@@ -210,12 +214,27 @@ fn log_lines(ui: &mut egui::Ui, log: &GitLog) {
     });
 }
 
+fn resize_handle(ui: &mut egui::Ui, height: &mut f32) {
+    let (rect, handle) = ui.allocate_exact_size(egui::vec2(ui.available_width(), HANDLE_HEIGHT), egui::Sense::drag());
+    if handle.hovered() || handle.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+    }
+    if handle.dragged() {
+        *height = (*height - handle.drag_delta().y).max(LEAST_PANEL_HEIGHT);
+    }
+    ui.painter().hline(rect.x_range(), rect.center().y, ui.visuals().widgets.noninteractive.bg_stroke);
+}
+
 pub(super) fn git_log_panel(ui: &mut egui::Ui, log: &mut GitLog, local_root: &str, repos: &[Repo]) {
     log.ensure_running(ui.ctx(), local_root);
-    egui::Panel::bottom(egui::Id::new(("git-log-panel", local_root))).resizable(true).default_size(PANEL_HEIGHT).show(ui, |ui| {
+    let mut wanted = log.height.unwrap_or(PANEL_HEIGHT);
+    let room = (ui.available_height() - LEAST_EXPLORER_HEIGHT).max(LEAST_PANEL_HEIGHT);
+    egui::Panel::bottom(egui::Id::new(("git-log-panel", local_root))).resizable(false).exact_size(wanted.min(room)).show(ui, |ui| {
+        resize_handle(ui, &mut wanted);
         log_header(ui, log, repos);
         log_lines(ui, log);
     });
+    log.height = Some(wanted);
     ui.ctx().request_repaint_after(Duration::from_secs(1));
 }
 

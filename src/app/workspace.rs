@@ -330,6 +330,7 @@ pub(super) struct Tab {
     pub(super) new_file: Option<NewFile>,
     pub(super) rename_file: Option<(FileEntry, String)>,
     pub(super) confirm_delete_folder: Option<String>,
+    pub(super) confirm_delete_ignored: Option<String>,
     pub(super) rename_folder: Option<(String, String)>,
     pub(super) panes: Panes,
     pub(super) layout: Layout,
@@ -394,7 +395,7 @@ impl Tab {
 
 impl Tab {
     pub(super) fn open(ws: Workspace, ctx: &egui::Context) -> Self {
-        let mut tab = Tab { ws, session: None, error: None, selected: None, order: Vec::new(), jumped_to: None, hl: None, hl_job: None, confirm: None, editing: None, unchanged: None, terminals: Terminals::default(), explorer_min_widths: [0.0; 2], confirm_delete: None, new_file: None, rename_file: None, confirm_delete_folder: None, rename_folder: None, edit: None, change: ChangeFocus::default(), explorers: Default::default(), searched_in: ExplorerKind::Files, commit: None, preview: None, hex: None, runner: None, git_log: GitLog::default(), definition: GoToDefinition::default(), quick_open: None, new_terminal: None, find: None, file_tabs: FileTabs::default(), show_source: false, source_of: None, panes: Panes::default(), layout: Layout::default() };
+        let mut tab = Tab { ws, session: None, error: None, selected: None, order: Vec::new(), jumped_to: None, hl: None, hl_job: None, confirm: None, editing: None, unchanged: None, terminals: Terminals::default(), explorer_min_widths: [0.0; 2], confirm_delete: None, new_file: None, rename_file: None, confirm_delete_folder: None, confirm_delete_ignored: None, rename_folder: None, edit: None, change: ChangeFocus::default(), explorers: Default::default(), searched_in: ExplorerKind::Files, commit: None, preview: None, hex: None, runner: None, git_log: GitLog::default(), definition: GoToDefinition::default(), quick_open: None, new_terminal: None, find: None, file_tabs: FileTabs::default(), show_source: false, source_of: None, panes: Panes::default(), layout: Layout::default() };
         tab.start(ctx);
         tab
     }

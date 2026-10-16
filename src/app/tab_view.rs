@@ -988,10 +988,20 @@ fn list_actions(ui: &mut egui::Ui, tab: &mut Tab, f: &mut Frame, acts: ListActio
     if let Some(e) = acts.delete {
         tab.confirm_delete = Some(e);
     }
+    if let Some(path) = acts.unignore {
+        f.cmds.push(Cmd::Unignore(path));
+    }
+    if let Some(path) = acts.delete_ignored {
+        tab.confirm_delete_ignored = Some(path);
+    }
     if delete_key_pressed(ui)
         && let Some(e) = tab.selected.as_deref().and_then(|path| f.entry(path))
     {
-        tab.confirm_delete = Some(e.clone());
+        if f.gitignored.contains(&e.path) {
+            tab.confirm_delete_ignored = Some(e.path.clone());
+        } else {
+            tab.confirm_delete = Some(e.clone());
+        }
     }
     if let Some(e) = acts.rename {
         let name = e.path.clone();
@@ -1049,7 +1059,19 @@ fn list_actions(ui: &mut egui::Ui, tab: &mut Tab, f: &mut Frame, acts: ListActio
     }
 }
 
+fn delete_ignored_dialog(ui: &mut egui::Ui, tab: &mut Tab, f: &mut Frame) {
+    let Some(path) = &tab.confirm_delete_ignored else { return };
+    let id = egui::Id::new(("confirm-delete-ignored", &tab.ws.local, &tab.ws.remote));
+    let text = format!("{path} is gitignored, so it only exists in {}: it is deleted there, for good (no backup). The remote is not touched.", tab.ws.local);
+    let Some(yes) = confirm(ui, id, &format!("Delete {path}?"), &text, "🗑 Delete") else { return };
+    if yes {
+        f.cmds.push(Cmd::DeleteIgnored(path.clone()));
+    }
+    tab.confirm_delete_ignored = None;
+}
+
 fn rename_and_new_file_dialogs(ui: &mut egui::Ui, tab: &mut Tab, f: &mut Frame) {
+    delete_ignored_dialog(ui, tab, f);
     if let Some((e, name)) = &mut tab.rename_file
         && let Some(rename) = rename_dialog(ui, &e.path, name)
     {

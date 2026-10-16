@@ -460,6 +460,46 @@ impl Engine {
         Ok(format!("Added {pattern} to {gitignore}{note}"))
     }
 
+    pub fn remove_from_gitignore(&self, path: &str) -> Result<String> {
+        let folder = path.ends_with('/');
+        let path = path.trim_end_matches('/');
+        if path.is_empty() || !contained(&self.local_root, path) {
+            bail!("{path}: refusing, the path goes through a symlink or out of the workspace");
+        }
+        let repos = self.repo_list();
+        let repo = closest_repo(&repos, path).with_context(|| format!("{path} is in no git repository"))?;
+        let rel = in_repo(repo, path);
+        let matched = self.git(repo, &["check-ignore", "-v", "--", rel]).ok().filter(|out| !out.is_empty()).with_context(|| format!("{path} is not gitignored"))?;
+        let rule = IgnoreRule::parse(&String::from_utf8_lossy(&matched)).with_context(|| format!("cannot read git's answer for {path}"))?;
+        let file = if Path::new(&rule.source).is_absolute() { PathBuf::from(&rule.source) } else { self.repo_dir(repo).join(&rule.source) };
+        if !file.starts_with(&self.local_root) {
+            bail!("{path} is ignored by {} line {} ({}), outside the workspace: edit it there", rule.source, rule.line, rule.pattern);
+        }
+        let base = match rule.source.strip_suffix(".gitignore") {
+            Some(dir) => join_repo(repo, dir.trim_end_matches('/')),
+            None => repo.to_string(),
+        };
+        let own = gitignore_escaped(in_repo(&base, path));
+        let original = fs::read_to_string(&file)?;
+        let mut lines: Vec<String> = original.lines().map(str::to_string).collect();
+        let index = rule.line.checked_sub(1).filter(|i| *i < lines.len()).with_context(|| format!("{} has no line {}", rule.source, rule.line))?;
+        let done = if rule.names_exactly(&own) {
+            lines.remove(index);
+            format!("Removed {} from {}", rule.pattern, rule.source)
+        } else {
+            let exception = format!("!/{own}{}", if folder { "/" } else { "" });
+            lines.insert(index + 1, exception.clone());
+            format!("Added {exception} to {} (after {})", rule.source, rule.pattern)
+        };
+        fs::write(&file, lines.iter().map(|l| format!("{l}\n")).collect::<String>())?;
+        if self.git(repo, &["check-ignore", "-q", "--", rel]).is_ok() {
+            fs::write(&file, original)?;
+            bail!("{path} stays ignored: a folder above it is ignored ({} line {}: {}). Un-ignore that folder first", rule.source, rule.line, rule.pattern);
+        }
+        self.gitignored.lock().unwrap().retain(|p| p != path && !p.starts_with(&format!("{path}/")));
+        Ok(done)
+    }
+
     pub fn current_version(&self, path: &str, rename: Option<&Rename>) -> u64 {
         let (lp, rp) = rename.map_or((path, path), |r| (r.local_path.as_str(), r.remote_path.as_str()));
         file_version(lp, rp, &self.local_root.join(lp), &self.mirror.join(rp))
@@ -899,6 +939,24 @@ impl Engine {
         self.git_add(path)
     }
 
+    pub fn delete_ignored(&self, path: &str) -> Result<()> {
+        let path = path.trim_end_matches('/');
+        if path.is_empty() || !contained(&self.local_root, path) {
+            bail!("{path}: refusing, the path goes through a symlink or out of the workspace");
+        }
+        if !self.is_gitignored_path(path) {
+            bail!("{path} is not gitignored: delete it with the usual Delete, which also updates the remote and git");
+        }
+        let full = self.local_root.join(path);
+        match fs::symlink_metadata(&full) {
+            Ok(meta) if meta.is_dir() => fs::remove_dir_all(&full)?,
+            Ok(_) => fs::remove_file(&full)?,
+            Err(_) => bail!("{path} does not exist"),
+        }
+        self.gitignored.lock().unwrap().retain(|p| p != path && !p.starts_with(&format!("{path}/")));
+        Ok(())
+    }
+
     pub fn make_remote_identical(&self) -> Result<usize> {
         let tracked: Vec<String> = self.tracked()?.into_iter().filter(|p| fs::symlink_metadata(self.local_root.join(p)).is_ok()).collect();
         let mut rules = BTreeSet::new();
@@ -1224,6 +1282,27 @@ fn closest_repo<'a>(repos: &'a [String], path: &str) -> Option<&'a str> {
 
 fn in_repo<'a>(repo: &str, path: &'a str) -> &'a str {
     if repo.is_empty() { path } else { &path[repo.len() + 1..] }
+}
+
+struct IgnoreRule {
+    source: String,
+    line: usize,
+    pattern: String,
+}
+
+impl IgnoreRule {
+    fn parse(answer: &str) -> Option<Self> {
+        let (rule, _) = answer.lines().next()?.split_once('\t')?;
+        let mut parts = rule.splitn(3, ':');
+        let (source, line, pattern) = (parts.next()?, parts.next()?.parse().ok()?, parts.next()?);
+        Some(IgnoreRule { source: source.to_string(), line, pattern: pattern.to_string() })
+    }
+
+    fn names_exactly(&self, own: &str) -> bool {
+        let core = self.pattern.trim_end_matches('/');
+        let anchored = core.starts_with('/') || core.contains('/');
+        anchored && core.trim_start_matches('/') == own
+    }
 }
 
 fn closest_gitignore_dir(local_root: &Path, repo: &str, path: &str) -> String {
@@ -1736,6 +1815,39 @@ mod tests {
         assert!(e.scan().unwrap().iter().all(|f| !f.path.starts_with("target/")), "{:?}", e.scan().unwrap());
         e.set_include_gitignored(true);
         assert!(e.scan().unwrap().iter().all(|f| !f.path.starts_with("target/")), "{:?}", e.scan().unwrap());
+    }
+
+    #[test]
+    fn unignores_by_removing_its_own_rule_or_adding_an_exception() {
+        let (local, _remote, e) = setup("unignore");
+        fs::write(local.join(".gitignore"), "target/\n*.log\n/telemetry\n").unwrap();
+        fs::create_dir_all(local.join("telemetry")).unwrap();
+        fs::write(local.join("telemetry/a.json"), "x").unwrap();
+        fs::write(local.join("debug.log"), "x").unwrap();
+        fs::write(local.join("keep.log"), "x").unwrap();
+        e.remove_from_gitignore("telemetry/").unwrap();
+        e.remove_from_gitignore("debug.log").unwrap();
+        let text = fs::read_to_string(local.join(".gitignore")).unwrap();
+        assert_eq!(text, "target/\n*.log\n!/debug.log\n");
+        assert!(!e.is_gitignored_path("telemetry") && !e.is_gitignored_path("debug.log") && e.is_gitignored_path("keep.log"));
+        fs::create_dir_all(local.join("target")).unwrap();
+        fs::write(local.join("target/x.bin"), "x").unwrap();
+        assert!(e.remove_from_gitignore("target/x.bin").is_err());
+        assert_eq!(fs::read_to_string(local.join(".gitignore")).unwrap(), text);
+    }
+
+    #[test]
+    fn deletes_gitignored_files_and_folders_locally_only() {
+        let (local, _remote, e) = setup("delete-ignored");
+        fs::create_dir_all(local.join("target/deep")).unwrap();
+        fs::write(local.join("target/deep/a.bin"), "x").unwrap();
+        fs::write(local.join("notes.log"), "x").unwrap();
+        fs::write(local.join(".gitignore"), "target/\n*.log\n").unwrap();
+        e.delete_ignored("notes.log").unwrap();
+        e.delete_ignored("target/").unwrap();
+        assert!(!local.join("notes.log").exists() && !local.join("target").exists());
+        assert!(e.delete_ignored("src/a.txt").is_err());
+        assert!(local.join("src/a.txt").exists());
     }
 
     #[test]

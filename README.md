@@ -175,6 +175,14 @@ until it succeeds, so your change is not overwritten.
     (`…/backups/<timestamp>/remote/`) when it differs.
     The **Delete** key does the same for the selected file (when no text
     field, editor or terminal has the keyboard), with the same confirmation.
+  - Right-click a gitignored file or folder → **👁 Unignore** asks git which rule ignores it: a
+    rule naming exactly that path is removed from its `.gitignore` (or `.git/info/exclude`), and a
+    broader one (`*.log`, `__pycache__/`) gets an exception right after it (`!/path`). When a
+    folder above it is ignored too, nothing is changed and the message names that folder's rule;
+    a rule from your global excludes is not edited.
+  - A gitignored file or folder (right-click it → **🗑 Delete…**, or the **Delete** key on a
+    gitignored file) is deleted from your local workspace only, after asking, for good (no
+    backup): it is never synced, so the remote is not touched.
   - Right-click a folder → **🗑 Delete…** does the same for every
     file listed in it, after asking; folders left empty are removed locally,
     and so is a folder that lists no file and holds none (like a new empty one).

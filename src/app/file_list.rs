@@ -66,6 +66,8 @@ pub(super) struct ListActions {
     pub(super) folder_clicked: Option<String>,
     pub(super) move_to: Option<(DraggedFile, String)>,
     pub(super) rename_folder: Option<String>,
+    pub(super) delete_ignored: Option<String>,
+    pub(super) unignore: Option<String>,
     pub(super) import: Option<(String, Vec<PathBuf>)>,
     pub(super) delete_folder: Option<String>,
 }
@@ -292,17 +294,20 @@ pub(super) fn file_item(ui: &mut egui::Ui, e: &FileEntry, in_tree: bool, ctx: &m
         {
             ctx.acts.rename = Some(e.clone());
         }
-        if ui
-            .add_enabled(refused.is_none(), egui::Button::new("🗑 Delete…"))
-            .on_hover_text("Locally, on the remote and in git (asks first)")
-            .on_disabled_hover_text(refused_help)
-            .clicked()
-        {
-            ctx.acts.delete = Some(e.clone());
+        let delete_help = if gitignored { "Locally only: gitignored, so never on the remote (asks first)" } else { "Locally, on the remote and in git (asks first)" };
+        if ui.button("🗑 Delete…").on_hover_text(delete_help).clicked() {
+            if gitignored {
+                ctx.acts.delete_ignored = Some(e.path.clone());
+            } else {
+                ctx.acts.delete = Some(e.clone());
+            }
         }
         ui.separator();
         if refused.is_none() && gitignore_button(ui) {
             ctx.acts.gitignore = Some(e.path.clone());
+        }
+        if gitignored && unignore_button(ui) {
+            ctx.acts.unignore = Some(e.path.clone());
         }
     });
 }
@@ -436,15 +441,32 @@ fn gitignored_folder_ui(ui: &mut egui::Ui, label: &str, path: &str, id_salt: Str
     if arrow.clicked() || label.inner.clicked() {
         toggle_gitignored_folder(path, ctx);
     }
-    label.inner.on_hover_text(hover);
+    label.inner.on_hover_text(hover).context_menu(|ui| gitignored_folder_menu(ui, path, ctx.acts));
+}
+
+fn unignore_button(ui: &mut egui::Ui) -> bool {
+    ui.button("👁 Unignore")
+        .on_hover_text("Remove the rule that ignores it from its .gitignore, or add an exception after it when the rule covers other files too")
+        .clicked()
+}
+
+fn gitignored_folder_menu(ui: &mut egui::Ui, path: &str, acts: &mut ListActions) {
+    if unignore_button(ui) {
+        acts.unignore = Some(path.to_string());
+    }
+    if ui.button("🗑 Delete…").on_hover_text("This folder and all it holds, locally only: gitignored, so never on the remote (asks first)").clicked() {
+        acts.delete_ignored = Some(path.to_string());
+    }
 }
 
 pub(super) fn gitignored_folder_row(ui: &mut egui::Ui, path: &str, ctx: &mut ListCtx) {
     let open = ctx.view.opened_gitignored.contains(path);
     let (title, hover) = gitignored_folder_title(&format!("{}{path}", if open { "⏷ " } else { "⏵ " }), path, ui);
-    if ui.add(egui::Label::new(title).selectable(false).sense(egui::Sense::click())).on_hover_text(hover).clicked() {
+    let row = ui.add(egui::Label::new(title).selectable(false).sense(egui::Sense::click())).on_hover_text(hover);
+    if row.clicked() {
         toggle_gitignored_folder(path, ctx);
     }
+    row.context_menu(|ui| gitignored_folder_menu(ui, path, ctx.acts));
 }
 
 fn gitignore_button(ui: &mut egui::Ui) -> bool {
