@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=agent-diff
+Comment=Review and sync what Claude changes in a remote workspace
+Exec=agent-diff
+Icon=agent-diff
+Terminal=false
+Categories=Development;
+StartupWMClass=agent-diff

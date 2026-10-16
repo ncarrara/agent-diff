@@ -1,0 +1,38 @@
+[package]
+name = "agent-diff"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
+clap = { version = "4.6.7", features = ["derive"] }
+dirs = "7.0.0"
+eframe = { version = "0.36.2", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+gltf = { version = "1.4.1", default-features = false, features = ["import", "utils"], optional = true }
+ignore = "0.4.33"
+hound = { version = "3.5.1", optional = true }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"], optional = true }
+notify = "8.2.0"
+portable-pty = "0.9.0"
+resvg = { version = "0.45.1", optional = true }
+similar = "3.2.0"
+symphonia = { version = "0.5.4", default-features = false, features = ["mp3"], optional = true }
+syntect = { version = "5.3.0", default-features = false, features = ["default-syntaxes", "default-themes", "regex-fancy"] }
+two-face = { version = "0.5.2", default-features = false, features = ["syntect-fancy"] }
+vt100 = "0.16.2"
+
+[features]
+default = ["images", "sounds", "models", "bash", "python", "svg", "html", "markdown"]
+images = ["dep:image"]
+sounds = ["dep:hound", "dep:symphonia"]
+models = ["dep:gltf"]
+bash = []
+python = []
+svg = ["dep:resvg"]
+html = []
+markdown = []
+
+[profile.dev]
+debug = 0
+

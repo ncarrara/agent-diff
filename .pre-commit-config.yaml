@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-test
+        name: cargo test
+        entry: sh -c 'unset $(git rev-parse --local-env-vars); cargo test'
+        language: system
+        pass_filenames: false
+        types: [rust]
