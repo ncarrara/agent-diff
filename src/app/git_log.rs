@@ -7,6 +7,7 @@ const LEAST_PANEL_HEIGHT: f32 = 60.0;
 const LEAST_EXPLORER_HEIGHT: f32 = 80.0;
 const HANDLE_HEIGHT: f32 = 6.0;
 const LONGEST_INTERVAL: u64 = 3600;
+const SHOWN_GRACE: Duration = Duration::from_secs(3);
 
 type Segment = (String, Option<u8>);
 
@@ -35,6 +36,7 @@ pub(super) struct GitLog {
     repo: Arc<Mutex<String>>,
     state: Arc<Mutex<LogState>>,
     poll: Arc<Mutex<GitPoll>>,
+    drawn_at: Arc<Mutex<Option<Instant>>>,
     alive: Option<Arc<()>>,
     bar_from_top: Option<f32>,
 }
@@ -54,21 +56,23 @@ impl GitLog {
         }
         let alive = Arc::new(());
         let watched = Arc::downgrade(&alive);
-        let (repo, state, poll, ctx, root) = (self.repo.clone(), self.state.clone(), self.poll.clone(), ctx.clone(), PathBuf::from(local_root));
+        let (repo, state, poll, drawn_at, ctx, root) = (self.repo.clone(), self.state.clone(), self.poll.clone(), self.drawn_at.clone(), ctx.clone(), PathBuf::from(local_root));
         std::thread::spawn(move || {
-            let (mut fetched_at, mut logged_at) = (None, None);
+            let mut logged_at = None;
+            let mut repository = Repository::default();
             while watched.upgrade().is_some() {
+                if !recently_drawn(&drawn_at) {
+                    logged_at = None;
+                    std::thread::sleep(TICK);
+                    continue;
+                }
                 let every = *poll.lock().unwrap();
                 let dir = root.join(repo.lock().unwrap().as_str());
-                let fetch_due = every.fetch_every > 0 && due(fetched_at, every.fetch_every);
-                if fetch_due {
-                    fetch(&dir, &state);
-                    fetched_at = Some(Instant::now());
-                }
+                let fetched = every.fetch_every > 0 && fetch_if_due(&dir, repository.of(&dir), every.fetch_every, &state);
                 if every.fetch_every == 0 {
                     state.lock().unwrap().fetch_error = None;
                 }
-                if fetch_due || due(logged_at, every.log_every.max(1)) {
+                if fetched || due(logged_at, every.log_every.max(1)) {
                     read_log(&dir, &state);
                     logged_at = Some(Instant::now());
                     ctx.request_repaint();
@@ -78,17 +82,65 @@ impl GitLog {
         });
         self.alive = Some(alive);
     }
+
+    fn mark_drawn(&self) {
+        *self.drawn_at.lock().unwrap() = Some(Instant::now());
+    }
+}
+
+fn recently_drawn(drawn_at: &Mutex<Option<Instant>>) -> bool {
+    drawn_at.lock().unwrap().is_some_and(|at| at.elapsed() < SHOWN_GRACE)
+}
+
+#[derive(Default)]
+struct Repository {
+    dir: PathBuf,
+    shared: Arc<Mutex<SharedFetch>>,
+}
+
+impl Repository {
+    fn of(&mut self, dir: &Path) -> Arc<Mutex<SharedFetch>> {
+        if self.dir != dir {
+            self.dir = dir.to_path_buf();
+            self.shared = shared_fetch(&common_git_dir(dir));
+        }
+        self.shared.clone()
+    }
+}
+
+#[derive(Default)]
+struct SharedFetch {
+    at: Option<Instant>,
+    error: Option<String>,
+}
+
+static SHARED_FETCHES: std::sync::LazyLock<Mutex<std::collections::HashMap<PathBuf, Arc<Mutex<SharedFetch>>>>> = std::sync::LazyLock::new(Default::default);
+
+fn shared_fetch(git_dir: &Path) -> Arc<Mutex<SharedFetch>> {
+    SHARED_FETCHES.lock().unwrap().entry(git_dir.to_path_buf()).or_default().clone()
+}
+
+fn common_git_dir(dir: &Path) -> PathBuf {
+    let listed = crate::engine::git_at(dir, &["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+    listed.ok().map(|out| PathBuf::from(String::from_utf8_lossy(&out).trim())).filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| dir.to_path_buf())
 }
 
 fn due(last: Option<Instant>, every: u64) -> bool {
     last.is_none_or(|at| at.elapsed() >= Duration::from_secs(every))
 }
 
-fn fetch(dir: &Path, state: &Mutex<LogState>) {
-    let fetched = crate::engine::git_at(dir, &["fetch", "--all", "--prune", "--quiet"]);
+fn fetch_if_due(dir: &Path, shared: Arc<Mutex<SharedFetch>>, every: u64, state: &Mutex<LogState>) -> bool {
+    let mut repository = shared.lock().unwrap();
+    if due(repository.at, every) {
+        let fetched = crate::engine::git_at(dir, &["fetch", "--all", "--prune", "--quiet"]);
+        repository.error = fetched.err().map(|e| format!("{e:#}"));
+        repository.at = Some(Instant::now());
+    }
     let mut s = state.lock().unwrap();
-    s.fetch_error = fetched.err().map(|e| format!("{e:#}"));
-    s.fetched = Some(Instant::now());
+    let new_fetch = s.fetched != repository.at;
+    s.fetched = repository.at;
+    s.fetch_error = repository.error.clone();
+    new_fetch
 }
 
 fn read_log(dir: &Path, state: &Mutex<LogState>) {
@@ -226,6 +278,7 @@ fn resize_handle(ui: &mut egui::Ui, bar_from_top: &mut f32) {
 }
 
 pub(super) fn git_log_panel(ui: &mut egui::Ui, log: &mut GitLog, local_root: &str, repos: &[Repo]) {
+    log.mark_drawn();
     log.ensure_running(ui.ctx(), local_root);
     let available = ui.available_height();
     let mut bar_from_top = log.bar_from_top.unwrap_or((available - PANEL_HEIGHT).max(LEAST_EXPLORER_HEIGHT));
@@ -252,6 +305,39 @@ mod tests {
         assert!(segments.contains(&("HEAD -> ".to_string(), Some(14))));
         assert!(segments.contains(&("main".to_string(), Some(10))));
         assert!(segments.contains(&(" fix".to_string(), None)));
+    }
+
+    fn repo_with_a_worktree(name: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("agent-diff-git-log-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let main = root.join("proj");
+        std::fs::create_dir_all(&main).unwrap();
+        let git = |dir: &Path, args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(dir).args(args).output().unwrap().status.success());
+        git(&main, &["init", "-q"]);
+        git(&main, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "first"]);
+        let linked = root.join("proj.wt/feat");
+        git(&main, &["worktree", "add", "-q", "-b", "feat", linked.to_str().unwrap()]);
+        (main, linked)
+    }
+
+    #[test]
+    fn worktrees_of_a_repository_share_one_fetch() {
+        let (main, linked) = repo_with_a_worktree("shared");
+        assert_eq!(common_git_dir(&main), common_git_dir(&linked));
+        let (main_state, linked_state) = (Mutex::new(LogState::default()), Mutex::new(LogState::default()));
+        let (mut main_repo, mut linked_repo) = (Repository::default(), Repository::default());
+        assert!(fetch_if_due(&main, main_repo.of(&main), 60, &main_state));
+        assert!(linked_repo.of(&linked).lock().unwrap().at.is_some());
+        assert!(fetch_if_due(&linked, linked_repo.of(&linked), 60, &linked_state));
+        assert_eq!(main_state.lock().unwrap().fetched, linked_state.lock().unwrap().fetched);
+        assert!(!fetch_if_due(&main, main_repo.of(&main), 60, &main_state));
+    }
+
+    #[test]
+    fn a_log_not_drawn_lately_is_paused() {
+        assert!(!recently_drawn(&Mutex::new(None)));
+        assert!(recently_drawn(&Mutex::new(Some(Instant::now()))));
+        assert!(!recently_drawn(&Mutex::new(Instant::now().checked_sub(SHOWN_GRACE * 2))));
     }
 
     #[test]

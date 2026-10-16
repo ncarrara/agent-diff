@@ -22,6 +22,7 @@ mod theme;
 mod window;
 mod workspace;
 mod git_log;
+mod worktree;
 
 use crate::diff::{Hunk, LineKind};
 use crate::highlight::{Highlighter, Line};
@@ -55,6 +56,7 @@ use theme::*;
 use window::*;
 use workspace::*;
 use git_log::*;
+use worktree::*;
 
 pub struct AgentDiffApp {
     tabs: Vec<Tab>,
@@ -73,6 +75,7 @@ pub struct AgentDiffApp {
     quit: QuitGuard,
     factory_reset: FactoryReset,
     wiped: bool,
+    removals: Vec<Receiver<Result<String, String>>>,
 }
 
 impl AgentDiffApp {
@@ -141,6 +144,7 @@ impl AgentDiffApp {
             quit: QuitGuard::default(),
             factory_reset: FactoryReset::default(),
             wiped: false,
+            removals: Vec::new(),
         };
         app.apply_theme(ctx, app.options.theme);
         app.saved_settings = app.settings_text();
@@ -284,6 +288,12 @@ impl eframe::App for AgentDiffApp {
         {
             self.edit_dialog(ui, i);
         }
+        if let Some(i) = self.active
+            && self.tabs[i].worktree.is_some()
+        {
+            self.worktree_dialog(ui.ctx(), i);
+        }
+        self.report_finished_removals();
         self.save_settings_if_changed();
         // Keep the "synced Ns ago" label ticking.
         ui.ctx().request_repaint_after(Duration::from_secs(1));
@@ -313,9 +323,15 @@ impl AgentDiffApp {
                                     (Some(n), _) => format!(" ({n})"),
                                     (None, _) => String::new(),
                                 };
-                                let text = RichText::new(format!("{}{badge}", tab.ws.title())).strong();
+                                let branch = tab.branch().map(|b| format!(" · {b}")).unwrap_or_default();
+                                let text = RichText::new(format!("{}{branch}{badge}", tab.ws.title())).strong();
                                 let hover = format!("{}\n⇄ {}", tab.ws.local, tab.ws.remote);
-                                let shown = closable_tab(ui, self.active == Some(i), |ui| tab_label(ui, text), Some("Close this workspace and reset it (its sync state is deleted)"));
+                                let activity = tab.terminals.activity();
+                                let label = |ui: &mut egui::Ui| {
+                                    tab_label(ui, text);
+                                    terminal_activity_mark(ui, activity);
+                                };
+                                let shown = closable_tab(ui, self.active == Some(i), label, Some("Close this workspace and reset it (its sync state is deleted)"));
                                 if let Some(moved) = dragged_onto(ui, egui::Id::new("workspace-tabs"), i, &shown.response) {
                                     tab_move = Some(moved);
                                 }
@@ -381,13 +397,80 @@ impl AgentDiffApp {
             // Dropping the tab stops its watcher and sync thread.
             self.tabs.remove(i);
             let errors = wipe_workspace_data(&places);
-            self.active = match self.active {
-                _ if self.tabs.is_empty() => None,
-                Some(a) if a > i => Some(a - 1),
-                Some(a) => Some(a.min(self.tabs.len() - 1)),
-                None => None,
-            };
+            self.active = self.active_after_removing(i);
             self.report_close_errors(&errors);
+        }
+    }
+
+    fn active_after_removing(&self, i: usize) -> Option<usize> {
+        match self.active {
+            _ if self.tabs.is_empty() => None,
+            Some(a) if a > i => Some(a - 1),
+            Some(a) => Some(a.min(self.tabs.len() - 1)),
+            None => None,
+        }
+    }
+
+    fn worktree_dialog(&mut self, ctx: &egui::Context, i: usize) {
+        let tab = &mut self.tabs[i];
+        let pending = tab.pending().unwrap_or(0);
+        let unsaved = tab.edit.as_ref().filter(|ed| ed.dirty()).map(|ed| ed.path.clone());
+        let Some(dialog) = tab.worktree.as_mut() else { return };
+        let outcome = worktree_dialog_ui(ctx, dialog, &tab.ws, pending, unsaved.as_deref());
+        match outcome {
+            WorktreeOutcome::Open => {}
+            WorktreeOutcome::Closed => self.tabs[i].worktree = None,
+            WorktreeOutcome::Created(ws) => {
+                self.tabs[i].worktree = None;
+                let shown = match self.tabs.iter().position(|t| t.ws.local == ws.local && t.ws.remote == ws.remote) {
+                    Some(j) => j,
+                    None => {
+                        self.tabs.insert(i + 1, Tab::open(ws, ctx));
+                        i + 1
+                    }
+                };
+                self.active = Some(shown);
+            }
+            WorktreeOutcome::Remove { delete_remote } => self.remove_worktree_tab(ctx, i, delete_remote),
+        }
+    }
+
+    fn remove_worktree_tab(&mut self, ctx: &egui::Context, i: usize, delete_remote: bool) {
+        let ws = self.tabs[i].ws.clone();
+        let places = workspace_data_places(&ws);
+        self.tabs.remove(i);
+        let errors = wipe_workspace_data(&places);
+        self.active = self.active_after_removing(i);
+        self.report_close_errors(&errors);
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let removed = Remote::parse(&ws.remote).and_then(|remote| crate::worktree::remove(Path::new(&ws.local), &remote, delete_remote));
+            let _ = tx.send(removed.map(|()| ws.title()).map_err(|e| format!("Removing the worktree {} failed: {e:#}", ws.title())));
+            ctx.request_repaint();
+        });
+        self.removals.push(rx);
+    }
+
+    fn report_finished_removals(&mut self) {
+        let mut finished = Vec::new();
+        self.removals.retain(|rx| match rx.try_recv() {
+            Ok(result) => {
+                finished.push(result);
+                false
+            }
+            Err(mpsc::TryRecvError::Empty) => true,
+            Err(mpsc::TryRecvError::Disconnected) => false,
+        });
+        for result in finished {
+            let message = match result {
+                Ok(title) => (false, format!("Worktree {title} removed")),
+                Err(e) => (true, e),
+            };
+            match self.active.and_then(|a| self.tabs[a].session.as_ref()) {
+                Some(session) => session.shared.lock().unwrap().message = Some(message),
+                None => eprintln!("{}", message.1),
+            }
         }
     }
 
@@ -487,6 +570,7 @@ impl AgentDiffApp {
                 } else if ws.local != tab.ws.local {
                     tab.terminals.end(&tab.ws.sessions, TermKind::Local);
                 }
+                tab.linked_worktree = crate::worktree::is_linked(Path::new(&ws.local));
                 tab.ws = ws;
                 tab.error = None;
                 tab.editing = None;

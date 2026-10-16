@@ -303,6 +303,8 @@ pub(super) struct Tab {
     pub(super) confirm: Option<(Bulk, String)>,
     /// The "edit workspace" dialog, when open.
     pub(super) editing: Option<EditForm>,
+    pub(super) worktree: Option<WorktreeDialog>,
+    pub(super) linked_worktree: bool,
     /// The selected unchanged file, read from disk for display.
     pub(super) unchanged: Option<FileEntry>,
     /// The Claude terminals, started when first shown.
@@ -395,7 +397,8 @@ impl Tab {
 
 impl Tab {
     pub(super) fn open(ws: Workspace, ctx: &egui::Context) -> Self {
-        let mut tab = Tab { ws, session: None, error: None, selected: None, order: Vec::new(), jumped_to: None, hl: None, hl_job: None, confirm: None, editing: None, unchanged: None, terminals: Terminals::default(), explorer_min_widths: [0.0; 2], confirm_delete: None, new_file: None, rename_file: None, confirm_delete_folder: None, confirm_delete_ignored: None, rename_folder: None, edit: None, change: ChangeFocus::default(), explorers: Default::default(), searched_in: ExplorerKind::Files, commit: None, preview: None, hex: None, runner: None, git_log: GitLog::default(), definition: GoToDefinition::default(), quick_open: None, new_terminal: None, find: None, file_tabs: FileTabs::default(), show_source: false, source_of: None, panes: Panes::default(), layout: Layout::default() };
+        let linked_worktree = crate::worktree::is_linked(Path::new(&ws.local));
+        let mut tab = Tab { ws, session: None, error: None, selected: None, order: Vec::new(), jumped_to: None, hl: None, hl_job: None, confirm: None, editing: None, worktree: None, linked_worktree, unchanged: None, terminals: Terminals::default(), explorer_min_widths: [0.0; 2], confirm_delete: None, new_file: None, rename_file: None, confirm_delete_folder: None, confirm_delete_ignored: None, rename_folder: None, edit: None, change: ChangeFocus::default(), explorers: Default::default(), searched_in: ExplorerKind::Files, commit: None, preview: None, hex: None, runner: None, git_log: GitLog::default(), definition: GoToDefinition::default(), quick_open: None, new_terminal: None, find: None, file_tabs: FileTabs::default(), show_source: false, source_of: None, panes: Panes::default(), layout: Layout::default() };
         tab.start(ctx);
         tab
     }
@@ -431,6 +434,11 @@ impl Tab {
 
     pub(super) fn pending(&self) -> Option<usize> {
         Some(self.session.as_ref()?.shared.lock().unwrap().entries.len())
+    }
+
+    pub(super) fn branch(&self) -> Option<String> {
+        let shared = self.session.as_ref()?.shared.lock().unwrap();
+        shared.repos.iter().find(|r| r.path.is_empty()).and_then(|r| r.branch.clone())
     }
 }
 

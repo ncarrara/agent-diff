@@ -183,12 +183,17 @@ fn show_local_files(engine: &Engine, shared: &Mutex<Shared>, ctx: &egui::Context
 type WatcherSlot = std::sync::Weak<Mutex<Option<notify::RecommendedWatcher>>>;
 
 fn watch_local(engine: &Engine, watch_tx: Sender<Cmd>, slot: WatcherSlot) -> Result<(notify::RecommendedWatcher, Vec<String>), String> {
-    let scope = WatchScope { root: engine.local_root.clone(), gitignored_dirs: Arc::new(engine.gitignored_dirs()) };
+    let scope = WatchScope { root: engine.local_root.clone(), gitignored_dirs: Arc::new(engine.gitignored_dirs()), linked_git_dirs: Arc::new(engine.linked_git_dirs()) };
     let root = scope.root.clone();
     let on_event = local_event_handler(scope.clone(), watch_tx, slot);
     let mut watcher = notify::recommended_watcher(on_event).map_err(|e| format!("{}: {e}", root.display()))?;
     let mut failed = Vec::new();
     watch_tree(&mut watcher, &scope, &root, &mut failed);
+    for git_dir in scope.linked_git_dirs.iter() {
+        if let Err(e) = watcher.watch(git_dir, notify::RecursiveMode::NonRecursive) {
+            failed.push(format!("{}: {e}", git_dir.display()));
+        }
+    }
     Ok((watcher, failed))
 }
 
@@ -196,6 +201,7 @@ fn watch_local(engine: &Engine, watch_tx: Sender<Cmd>, slot: WatcherSlot) -> Res
 struct WatchScope {
     root: PathBuf,
     gitignored_dirs: Arc<std::collections::BTreeSet<String>>,
+    linked_git_dirs: Arc<Vec<PathBuf>>,
 }
 
 impl WatchScope {
@@ -223,6 +229,10 @@ impl WatchScope {
             .stderr(std::process::Stdio::null())
             .status()
             .is_ok_and(|status| status.success())
+    }
+
+    fn is_linked_index(&self, path: &std::path::Path) -> bool {
+        self.linked_git_dirs.iter().any(|dir| path == dir.join("index") || path == dir.join("HEAD"))
     }
 
     fn ignores_event(&self, path: &std::path::Path) -> bool {
@@ -258,7 +268,7 @@ fn local_event_handler(scope: WatchScope, watch_tx: Sender<Cmd>, slot: WatcherSl
             }
         }
         let interesting = ev.paths.iter().any(|p| {
-            p.ends_with(".git/index") || !p.components().any(|c| c == Component::Normal(".git".as_ref())) && !scope.ignores_event(p)
+            p.ends_with(".git/index") || scope.is_linked_index(p) || !p.components().any(|c| c == Component::Normal(".git".as_ref())) && !scope.ignores_event(p)
         });
         if interesting && !ev.kind.is_access() {
             let _ = watch_tx.send(Cmd::LocalChanged);

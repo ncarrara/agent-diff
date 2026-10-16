@@ -423,6 +423,10 @@ impl Engine {
         list_repos(&self.local_root).into_iter().map(|path| Repo { branch: branch(&self.local_root.join(&path)), path }).collect()
     }
 
+    pub fn linked_git_dirs(&self) -> Vec<PathBuf> {
+        self.repo_list().iter().filter_map(|path| linked_git_dir(&self.local_root.join(path))).collect()
+    }
+
     fn repo_list(&self) -> Vec<String> {
         let known = self.known_repos.lock().unwrap().clone();
         if known.is_empty() { list_repos(&self.local_root) } else { known }
@@ -1252,14 +1256,18 @@ fn walk_repos(root: &Path) -> Vec<String> {
     repos
 }
 
-fn branch(repo_dir: &Path) -> Option<String> {
+fn linked_git_dir(repo_dir: &Path) -> Option<PathBuf> {
     let dot_git = repo_dir.join(".git");
-    let git_dir = if dot_git.is_file() {
-        let link = fs::read_to_string(&dot_git).ok()?;
-        repo_dir.join(link.trim().strip_prefix("gitdir:")?.trim())
-    } else {
-        dot_git
-    };
+    if !dot_git.is_file() {
+        return None;
+    }
+    let link = fs::read_to_string(&dot_git).ok()?;
+    let git_dir = repo_dir.join(link.trim().strip_prefix("gitdir:")?.trim());
+    Some(git_dir.canonicalize().unwrap_or(git_dir))
+}
+
+fn branch(repo_dir: &Path) -> Option<String> {
+    let git_dir = linked_git_dir(repo_dir).unwrap_or_else(|| repo_dir.join(".git"));
     let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
     let head = head.trim();
     Some(match head.strip_prefix("ref: refs/heads/") {

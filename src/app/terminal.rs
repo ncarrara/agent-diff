@@ -1155,7 +1155,35 @@ pub(super) struct Terminals {
     pub(super) maximized: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) enum TermActivity {
+    Idle,
+    Working,
+    Done,
+}
+
+pub(super) fn terminal_activity_mark(ui: &mut egui::Ui, activity: TermActivity) {
+    match activity {
+        TermActivity::Working => {
+            ui.add(egui::Spinner::new().size(ui.text_style_height(&egui::TextStyle::Body))).on_hover_text("Working…");
+        }
+        TermActivity::Done => tab_label(ui, RichText::new("✔").color(Color32::from_rgb(0x4c, 0xc0, 0x6a)).strong()),
+        TermActivity::Idle => {}
+    }
+}
+
 impl Terminals {
+    pub(super) fn activity(&self) -> TermActivity {
+        let working = self.running.values().flatten().any(|t| !t.exited() && t.waiting());
+        if working {
+            TermActivity::Working
+        } else if self.done.is_empty() {
+            TermActivity::Idle
+        } else {
+            TermActivity::Done
+        }
+    }
+
     pub(super) fn poll_finished(&mut self, sessions: &[TermTab], watched: bool, ctx: &egui::Context) -> Vec<String> {
         let mut finished = Vec::new();
         for (i, tab) in sessions.iter().enumerate() {
@@ -1275,11 +1303,14 @@ pub(super) fn terminal_panel(terms: &mut Terminals, sessions: &mut Vec<TermTab>,
                     i == terms.shown,
                     |ui| {
                         tab_label(ui, name);
-                        if busy {
-                            ui.add(egui::Spinner::new().size(ui.text_style_height(&egui::TextStyle::Body))).on_hover_text("Working…");
+                        let activity = if busy {
+                            TermActivity::Working
                         } else if terms.done.contains(id) {
-                            tab_label(ui, RichText::new("✔").color(Color32::from_rgb(0x4c, 0xc0, 0x6a)).strong());
-                        }
+                            TermActivity::Done
+                        } else {
+                            TermActivity::Idle
+                        };
+                        terminal_activity_mark(ui, activity);
                         if ended {
                             tab_label(ui, RichText::new("ended").color(Color32::LIGHT_RED));
                         }

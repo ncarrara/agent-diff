@@ -273,6 +273,7 @@ fn top_bar(ui: &mut egui::Ui, tab: &mut Tab, f: &mut Frame, show_terminal: &mut 
         ui.horizontal_wrapped(|ui| {
             commit_button(ui, tab, f);
             edit = workspace_buttons(ui, f);
+            worktree_menu(ui, tab);
             terminal_menu(ui, tab, show_terminal);
             progress_indicator(ui, f);
         });

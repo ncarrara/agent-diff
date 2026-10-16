@@ -93,11 +93,8 @@ impl Remote {
         }
     }
 
-    pub fn gitignored_paths(&self, repos: &[String]) -> Option<Vec<String>> {
-        if repos.is_empty() {
-            return None;
-        }
-        let (root, mut cmd) = match self {
+    fn shell(&self) -> (String, Command) {
+        match self {
             Remote::Local(path) => {
                 let mut cmd = Command::new("sh");
                 cmd.arg("-c");
@@ -108,7 +105,42 @@ impl Remote {
                 cmd.args(ssh_options()).arg(host);
                 (path.clone(), cmd)
             }
-        };
+        }
+    }
+
+    fn run_on_root(&self, script: impl Fn(&str) -> String) -> Result<()> {
+        let (root, mut cmd) = self.shell();
+        let out = cmd.arg(script(&shell_quote(&root))).stdin(Stdio::null()).output().context("failed to reach the remote")?;
+        if !out.status.success() {
+            self.forget_connection();
+            bail!("{}: {}", self.display(), String::from_utf8_lossy(&out.stderr).trim());
+        }
+        Ok(())
+    }
+
+    pub fn create_dir_all(&self) -> Result<()> {
+        self.run_on_root(|root| format!("mkdir -p -- {root}"))
+    }
+
+    pub fn exists(&self) -> Result<bool> {
+        let (root, mut cmd) = self.shell();
+        let out = cmd.arg(format!("test -e {}", shell_quote(&root))).stdin(Stdio::null()).output().context("failed to reach the remote")?;
+        match out.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => bail!("{}: {}", self.display(), String::from_utf8_lossy(&out.stderr).trim()),
+        }
+    }
+
+    pub fn remove_dir_all(&self) -> Result<()> {
+        self.run_on_root(|root| format!("rm -rf -- {root}"))
+    }
+
+    pub fn gitignored_paths(&self, repos: &[String]) -> Option<Vec<String>> {
+        if repos.is_empty() {
+            return None;
+        }
+        let (root, mut cmd) = self.shell();
         let out = cmd.arg(gitignored_script(&root, repos)).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
         if !out.status.success() {
             return None;

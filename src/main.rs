@@ -4,6 +4,7 @@ mod engine;
 mod highlight;
 mod icon;
 mod remote;
+mod worktree;
 
 use clap::Parser;
 use eframe::egui;
