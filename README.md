@@ -63,7 +63,8 @@ until it succeeds, so your change is not overwritten.
   excludes), on both sides. `git add` is detected right away. A file pulled,
   created or deleted locally is `git add`ed / `git rm --cached` in the
   closest repository containing it (none if it is in no repository).
-- **git log panel**: at the bottom of the **Changes** panel (drag its top edge to resize), the
+- **git log panel**: at the bottom of the **Changes** panel (drag its top bar to move it; the bar
+  stays where you put it when the terminal grows, the log below it gets shorter), the
   output of `git log --oneline --all --graph --decorate` (last 400 commits) of your local
   workspace, refreshed every 5 seconds after a `git fetch --all --prune` (which also prunes the
   remote branches gone from `origin`, like `git remote prune origin`). Its **⚙** sets how often to
