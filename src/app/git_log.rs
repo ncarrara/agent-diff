@@ -3,8 +3,8 @@ use super::*;
 const TICK: Duration = Duration::from_secs(1);
 const SHOWN_COMMITS: &str = "400";
 const PANEL_HEIGHT: f32 = 220.0;
-const LEAST_PANEL_HEIGHT: f32 = 60.0;
-const LEAST_EXPLORER_HEIGHT: f32 = 80.0;
+const LEAST_PANEL_HEIGHT: f32 = 120.0;
+const LEAST_EXPLORER_HEIGHT: f32 = 160.0;
 const HANDLE_HEIGHT: f32 = 6.0;
 const LONGEST_INTERVAL: u64 = 3600;
 const SHOWN_GRACE: Duration = Duration::from_secs(3);
@@ -29,6 +29,16 @@ struct LogState {
     fetch_error: Option<String>,
     log_error: Option<String>,
     fetched: Option<Instant>,
+    worktrees: Vec<crate::worktree::Listed>,
+    branches: Vec<crate::worktree::Branch>,
+}
+
+#[derive(Clone, Copy, Default, PartialEq)]
+enum LogView {
+    #[default]
+    Log,
+    Worktrees,
+    Branches,
 }
 
 #[derive(Default)]
@@ -39,6 +49,9 @@ pub(super) struct GitLog {
     drawn_at: Arc<Mutex<Option<Instant>>>,
     alive: Option<Arc<()>>,
     bar_from_top: Option<f32>,
+    remove_request: Option<PathBuf>,
+    branch_request: Option<(PathBuf, crate::worktree::Branch)>,
+    view: LogView,
 }
 
 impl GitLog {
@@ -145,7 +158,11 @@ fn fetch_if_due(dir: &Path, shared: Arc<Mutex<SharedFetch>>, every: u64, state: 
 
 fn read_log(dir: &Path, state: &Mutex<LogState>) {
     let log = crate::engine::git_at(dir, &["log", "--oneline", "--all", "--graph", "--decorate", "--color=always", "-n", SHOWN_COMMITS]);
+    let worktrees = crate::worktree::list(dir);
+    let branches = crate::worktree::local_branches(dir);
     let mut s = state.lock().unwrap();
+    s.worktrees = worktrees;
+    s.branches = branches;
     match log {
         Ok(out) => {
             s.lines = String::from_utf8_lossy(&out).lines().map(colored_segments).collect();
@@ -228,9 +245,23 @@ fn poll_settings(ui: &mut egui::Ui, log: &GitLog) {
     log.adopt(poll);
 }
 
-fn log_header(ui: &mut egui::Ui, log: &GitLog, repos: &[Repo]) {
+fn view_tabs(ui: &mut egui::Ui, log: &mut GitLog) {
+    let (worktrees, branches) = {
+        let state = log.state.lock().unwrap();
+        (state.worktrees.len().saturating_sub(1), state.branches.len())
+    };
+    let tabs = [(LogView::Log, "git log".to_string()), (LogView::Worktrees, format!("🌿 worktrees ({worktrees})")), (LogView::Branches, format!("⑂ branches ({branches})"))];
+    for (view, label) in tabs {
+        if ui.selectable_label(log.view == view, RichText::new(label).strong()).clicked() {
+            log.view = view;
+        }
+    }
+}
+
+fn log_header(ui: &mut egui::Ui, log: &mut GitLog, repos: &[Repo]) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new("git log").strong());
+        view_tabs(ui, log);
+        ui.separator();
         repo_picker(ui, log, repos);
         ui.menu_button("⚙", |ui| poll_settings(ui, log)).response.on_hover_text("How often to fetch and to refresh the log, for every workspace");
         let state = log.state.lock().unwrap();
@@ -266,29 +297,124 @@ fn log_lines(ui: &mut egui::Ui, log: &GitLog) {
     });
 }
 
-fn resize_handle(ui: &mut egui::Ui, bar_from_top: &mut f32) {
+fn resize_handle(ui: &mut egui::Ui) -> Option<f32> {
     let (rect, handle) = ui.allocate_exact_size(egui::vec2(ui.available_width(), HANDLE_HEIGHT), egui::Sense::drag());
     if handle.hovered() || handle.dragged() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        ui.painter().hline(rect.x_range(), rect.center().y, ui.visuals().widgets.hovered.fg_stroke);
     }
-    if handle.dragged() {
-        *bar_from_top = (*bar_from_top + handle.drag_delta().y).max(LEAST_EXPLORER_HEIGHT);
+    handle.dragged().then(|| handle.drag_delta().y)
+}
+
+fn log_height(available: f32, bar_from_top: f32) -> f32 {
+    let least = LEAST_EXPLORER_HEIGHT + LEAST_PANEL_HEIGHT;
+    if available <= least {
+        return available * LEAST_PANEL_HEIGHT / least;
     }
-    ui.painter().hline(rect.x_range(), rect.center().y, ui.visuals().widgets.noninteractive.bg_stroke);
+    available - bar_from_top.clamp(LEAST_EXPLORER_HEIGHT, available - LEAST_PANEL_HEIGHT)
+}
+
+impl GitLog {
+    pub(super) fn take_remove_request(&mut self) -> Option<PathBuf> {
+        self.remove_request.take()
+    }
+
+    pub(super) fn take_branch_request(&mut self) -> Option<(PathBuf, crate::worktree::Branch)> {
+        self.branch_request.take()
+    }
+
+    fn repo_dir(&self, local_root: &str) -> PathBuf {
+        Path::new(local_root).join(self.repo.lock().unwrap().as_str())
+    }
+}
+
+fn same_folder(a: &Path, b: &Path) -> bool {
+    a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
+}
+
+fn worktree_list(ui: &mut egui::Ui, log: &mut GitLog, local_root: &str) {
+    let worktrees = log.state.lock().unwrap().worktrees.clone();
+    if worktrees.len() < 2 {
+        ui.weak("No other worktree: 🌿 → New worktree… in the top bar adds one.");
+        return;
+    }
+    egui::ScrollArea::vertical().id_salt(("worktree-list", local_root)).auto_shrink(false).show(ui, |ui| {
+        for worktree in &worktrees {
+            if worktree_row(ui, worktree, Path::new(local_root)) {
+                log.remove_request = Some(worktree.path.clone());
+            }
+        }
+    });
+}
+
+fn branch_list(ui: &mut egui::Ui, log: &mut GitLog, local_root: &str) {
+    let branches = log.state.lock().unwrap().branches.clone();
+    egui::ScrollArea::vertical().id_salt(("branch-list", local_root)).auto_shrink(false).show(ui, |ui| {
+        for branch in &branches {
+            if branch_row(ui, branch) {
+                log.branch_request = Some((log.repo_dir(local_root), branch.clone()));
+            }
+        }
+    });
+}
+
+fn branch_row(ui: &mut egui::Ui, branch: &crate::worktree::Branch) -> bool {
+    let mut delete = false;
+    ui.horizontal(|ui| {
+        let button = ui.add_enabled(branch.checked_out_in.is_none(), egui::Button::new(RichText::new("🗑").small()));
+        let why_not = format!("Checked out in {}: switch it to another branch or remove that worktree first", branch.checked_out_in.as_deref().unwrap_or(Path::new("")).display());
+        delete = button.on_hover_text("Delete this branch…").on_disabled_hover_text(why_not).clicked();
+        let mut name = RichText::new(format!("⑂ {}", branch.name)).color(REPO);
+        if branch.current {
+            name = name.strong();
+        }
+        ui.label(name);
+        if let Some(upstream) = &branch.upstream {
+            ui.weak(RichText::new(format!("→ {upstream}")).small());
+        }
+    });
+    delete
+}
+
+fn worktree_row(ui: &mut egui::Ui, worktree: &crate::worktree::Listed, shown: &Path) -> bool {
+    let mut remove = false;
+    ui.horizontal(|ui| {
+        let deletable = !worktree.main && !worktree.missing;
+        let button = ui.add_enabled(deletable, egui::Button::new(RichText::new("🗑").small()));
+        let why_not = if worktree.main { "The main worktree holds the repository: it is not removed from here" } else { "Its folder is gone: git worktree prune forgets it" };
+        remove = button.on_hover_text("Remove this worktree…").on_disabled_hover_text(why_not).clicked();
+        let branch = worktree.branch.as_deref().unwrap_or("(detached)");
+        let mut name = RichText::new(format!("🌿 {branch}")).color(REPO);
+        if same_folder(&worktree.path, shown) {
+            name = name.strong();
+        }
+        ui.label(name).on_hover_text(worktree.path.display().to_string());
+        let place = if worktree.missing { "missing".to_string() } else { worktree.path.display().to_string() };
+        ui.weak(RichText::new(place).small());
+    });
+    remove
 }
 
 pub(super) fn git_log_panel(ui: &mut egui::Ui, log: &mut GitLog, local_root: &str, repos: &[Repo]) {
     log.mark_drawn();
     log.ensure_running(ui.ctx(), local_root);
     let available = ui.available_height();
-    let mut bar_from_top = log.bar_from_top.unwrap_or((available - PANEL_HEIGHT).max(LEAST_EXPLORER_HEIGHT));
-    let below_bar = (available - bar_from_top).max(LEAST_PANEL_HEIGHT);
+    let wanted = log.bar_from_top.unwrap_or(available - PANEL_HEIGHT);
+    let below_bar = log_height(available, wanted);
+    let mut dragged = None;
     egui::Panel::bottom(egui::Id::new(("git-log-panel", local_root))).resizable(false).exact_size(below_bar).show(ui, |ui| {
-        resize_handle(ui, &mut bar_from_top);
+        dragged = resize_handle(ui);
         log_header(ui, log, repos);
-        log_lines(ui, log);
+        match log.view {
+            LogView::Log => log_lines(ui, log),
+            LogView::Worktrees => worktree_list(ui, log, local_root),
+            LogView::Branches => branch_list(ui, log, local_root),
+        }
     });
-    log.bar_from_top = Some(bar_from_top);
+    log.bar_from_top = Some(match dragged {
+        Some(delta) => available - log_height(available, available - below_bar + delta),
+        None => wanted,
+    });
     ui.ctx().request_repaint_after(Duration::from_secs(1));
 }
 
@@ -338,6 +464,15 @@ mod tests {
         assert!(!recently_drawn(&Mutex::new(None)));
         assert!(recently_drawn(&Mutex::new(Some(Instant::now()))));
         assert!(!recently_drawn(&Mutex::new(Instant::now().checked_sub(SHOWN_GRACE * 2))));
+    }
+
+    #[test]
+    fn the_log_and_the_list_above_it_keep_their_least_heights() {
+        assert_eq!(log_height(800.0, 580.0), 220.0);
+        assert_eq!(log_height(800.0, 790.0), LEAST_PANEL_HEIGHT);
+        assert_eq!(log_height(800.0, 20.0), 800.0 - LEAST_EXPLORER_HEIGHT);
+        let cramped = (LEAST_EXPLORER_HEIGHT + LEAST_PANEL_HEIGHT) / 2.0;
+        assert_eq!(log_height(cramped, 0.0), LEAST_PANEL_HEIGHT / 2.0);
     }
 
     #[test]

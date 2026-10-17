@@ -144,7 +144,7 @@ pub(super) fn tab_ui(tab: &mut Tab, ui: &mut egui::Ui, highlighter: &Highlighter
     bulk_confirmation(ui, tab, &mut f);
     list_actions(ui, tab, &mut f, acts);
     rename_and_new_file_dialogs(ui, tab, &mut f);
-    commit_and_delete_dialogs(ui, tab, &mut f);
+    commit_and_delete_dialogs(ui, tab, &mut f, show_terminal);
     delete_folder_dialog(ui, tab, &mut f);
 
     if let Some(session) = &tab.session {
@@ -1123,7 +1123,7 @@ fn reveal_created_file(tab: &mut Tab, f: &mut Frame) {
     }
 }
 
-fn commit_and_delete_dialogs(ui: &mut egui::Ui, tab: &mut Tab, f: &mut Frame) {
+fn commit_and_delete_dialogs(ui: &mut egui::Ui, tab: &mut Tab, f: &mut Frame, show_terminal: &mut bool) {
     if let Some(dialog) = &mut tab.commit {
         match commit_dialog(ui, dialog, &f.local) {
             CommitOutcome::Open => {}
@@ -1131,9 +1131,15 @@ fn commit_and_delete_dialogs(ui: &mut egui::Ui, tab: &mut Tab, f: &mut Frame) {
                 dialog.remember_unticked(&mut tab.ws.skip_commit);
                 tab.commit = None;
             }
-            CommitOutcome::Commit(c) => {
+            CommitOutcome::Commit { push } => {
                 dialog.remember_unticked(&mut tab.ws.skip_commit);
-                f.cmds.push(c);
+                match dialog.run_in_terminal(&f.state_dir, &f.local, push) {
+                    Ok(command) => {
+                        tab.terminals.run_in_shell(&mut tab.ws.sessions, TermKind::Local, command);
+                        *show_terminal = true;
+                    }
+                    Err(e) => f.report_error(format!("could not write the commit message: {e}")),
+                }
                 tab.commit = None;
             }
         }

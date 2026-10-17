@@ -109,13 +109,60 @@ impl Remote {
     }
 
     fn run_on_root(&self, script: impl Fn(&str) -> String) -> Result<()> {
-        let (root, mut cmd) = self.shell();
-        let out = cmd.arg(script(&shell_quote(&root))).stdin(Stdio::null()).output().context("failed to reach the remote")?;
+        let root = shell_quote(&self.root_path());
+        self.run(&script(&root))
+    }
+
+    fn run(&self, script: &str) -> Result<()> {
+        let (_, mut cmd) = self.shell();
+        let out = cmd.arg(script).stdin(Stdio::null()).output().context("failed to reach the remote")?;
         if !out.status.success() {
             self.forget_connection();
             bail!("{}: {}", self.display(), String::from_utf8_lossy(&out.stderr).trim());
         }
         Ok(())
+    }
+
+    pub fn command(&self, script: &str) -> Command {
+        let (_, mut cmd) = self.shell();
+        cmd.arg(script);
+        cmd
+    }
+
+    pub fn root_path(&self) -> String {
+        match self {
+            Remote::Local(path) => path.display().to_string(),
+            Remote::Ssh { path, .. } => path.clone(),
+        }
+    }
+
+    pub fn same_host(&self, other: &Remote) -> bool {
+        match (self, other) {
+            (Remote::Local(_), Remote::Local(_)) => true,
+            (Remote::Ssh { host, .. }, Remote::Ssh { host: other, .. }) => host == other,
+            _ => false,
+        }
+    }
+
+    pub fn copy_missing_from(&self, source: &Remote, paths: &[String]) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        if !self.same_host(source) {
+            bail!("{} and {} are not on the same host", source.display(), self.display());
+        }
+        self.run(&copy_missing_script(&source.root_path(), &self.root_path(), paths))
+    }
+
+    pub fn shell_line(&self, script: &str) -> String {
+        match self {
+            Remote::Local(_) => script.to_string(),
+            Remote::Ssh { host, .. } => format!("ssh {} {}", shell_quote(host), shell_quote(script)),
+        }
+    }
+
+    pub fn remove_dir_line(&self) -> String {
+        self.shell_line(&format!("rm -rf -- {}", shell_quote(&self.root_path())))
     }
 
     pub fn create_dir_all(&self) -> Result<()> {
@@ -334,6 +381,19 @@ fn gitignored_script(root: &str, repos: &[String]) -> String {
             let dir = if repo.is_empty() { shell_quote(root) } else { format!("{}/{}", shell_quote(root), shell_quote(repo)) };
             let marker = shell_quote(&format!("{REPO_MARKER}{repo}"));
             format!("printf '%s\\0' {marker} && {{ [ ! -d {dir} ] || (cd {dir} && git ls-files -z --others --ignored --exclude-standard --directory) || printf '%s\\0' '{LISTING_FAILED}'; }}")
+        })
+        .collect::<Vec<_>>()
+        .join(" && ")
+}
+
+fn copy_missing_script(source: &str, destination: &str, paths: &[String]) -> String {
+    paths
+        .iter()
+        .map(|path| {
+            let path = path.trim_end_matches('/');
+            let parent = path.rsplit_once('/').map(|(parent, _)| format!("/{parent}")).unwrap_or_default();
+            let (from, to, folder) = (shell_quote(&format!("{source}/{path}")), shell_quote(&format!("{destination}/{path}")), shell_quote(&format!("{destination}{parent}")));
+            format!("{{ [ -e {to} ] || [ ! -e {from} ] || {{ mkdir -p -- {folder} && cp -a -- {from} {to}; }}; }}")
         })
         .collect::<Vec<_>>()
         .join(" && ")

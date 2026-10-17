@@ -4,6 +4,7 @@ mod engine;
 mod highlight;
 mod icon;
 mod remote;
+mod setup;
 mod worktree;
 
 use clap::Parser;

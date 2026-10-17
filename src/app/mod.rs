@@ -75,7 +75,6 @@ pub struct AgentDiffApp {
     quit: QuitGuard,
     factory_reset: FactoryReset,
     wiped: bool,
-    removals: Vec<Receiver<Result<String, String>>>,
 }
 
 impl AgentDiffApp {
@@ -144,7 +143,6 @@ impl AgentDiffApp {
             quit: QuitGuard::default(),
             factory_reset: FactoryReset::default(),
             wiped: false,
-            removals: Vec::new(),
         };
         app.apply_theme(ctx, app.options.theme);
         app.saved_settings = app.settings_text();
@@ -264,17 +262,36 @@ const BOTH: Color32 = Color32::from_rgb(0xe0, 0xc0, 0x40);
 impl eframe::App for AgentDiffApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.tab_bar(ui);
+        for tab in &mut self.tabs {
+            tab.poll_creation(ui.ctx());
+        }
+        let mut close_creating = None;
         match self.active {
             Some(i) => {
                 let tab = &mut self.tabs[i];
                 tab.take_failed_session();
-                if tab.session.is_some() {
+                if tab.creating.is_some() {
+                    close_creating = creating_tab_ui(tab, ui).then_some(i);
+                } else if tab.session.is_some() {
                     tab_ui(tab, ui, &self.highlighter, &mut self.options);
                 } else {
                     failed_tab_ui(tab, ui);
                 }
             }
             None => self.setup_ui(ui),
+        }
+        if let Some(i) = close_creating {
+            self.close_tab(i);
+        }
+        if let Some(i) = self.active
+            && let Some(path) = self.tabs[i].git_log.take_remove_request()
+        {
+            self.ask_to_remove_worktree(i, &path);
+        }
+        if let Some(i) = self.active
+            && let Some((repo, branch)) = self.tabs[i].git_log.take_branch_request()
+        {
+            self.tabs[i].worktree = Some(WorktreeDialog::DeleteBranch(BranchForm::new(repo, branch)));
         }
         resize_edges(ui.ctx());
         self.notify_finished_commands(ui.ctx());
@@ -293,7 +310,6 @@ impl eframe::App for AgentDiffApp {
         {
             self.worktree_dialog(ui.ctx(), i);
         }
-        self.report_finished_removals();
         self.save_settings_if_changed();
         // Keep the "synced Ns ago" label ticking.
         ui.ctx().request_repaint_after(Duration::from_secs(1));
@@ -326,7 +342,7 @@ impl AgentDiffApp {
                                 let branch = tab.branch().map(|b| format!(" · {b}")).unwrap_or_default();
                                 let text = RichText::new(format!("{}{branch}{badge}", tab.ws.title())).strong();
                                 let hover = format!("{}\n⇄ {}", tab.ws.local, tab.ws.remote);
-                                let activity = tab.terminals.activity();
+                                let activity = if tab.creation_running() { TermActivity::Working } else { tab.terminals.activity() };
                                 let label = |ui: &mut egui::Ui| {
                                     tab_label(ui, text);
                                     terminal_activity_mark(ui, activity);
@@ -393,13 +409,16 @@ impl AgentDiffApp {
             close = yes.then_some(i);
         }
         if let Some(i) = close {
-            let places = workspace_data_places(&self.tabs[i].ws);
-            // Dropping the tab stops its watcher and sync thread.
-            self.tabs.remove(i);
-            let errors = wipe_workspace_data(&places);
-            self.active = self.active_after_removing(i);
-            self.report_close_errors(&errors);
+            self.close_tab(i);
         }
+    }
+
+    fn close_tab(&mut self, i: usize) {
+        let places = workspace_data_places(&self.tabs[i].ws);
+        self.tabs.remove(i);
+        let errors = wipe_workspace_data(&places);
+        self.active = self.active_after_removing(i);
+        self.report_close_errors(&errors);
     }
 
     fn active_after_removing(&self, i: usize) -> Option<usize> {
@@ -411,66 +430,81 @@ impl AgentDiffApp {
         }
     }
 
+    fn tab_of_folder(&self, folder: &Path) -> Option<usize> {
+        let canonical = folder.canonicalize().unwrap_or_else(|_| folder.to_path_buf());
+        self.tabs.iter().position(|t| Path::new(&t.ws.local) == folder || Path::new(&t.ws.local) == canonical)
+    }
+
+    fn ask_to_remove_worktree(&mut self, i: usize, path: &Path) {
+        let dialog = match self.tab_of_folder(path) {
+            Some(j) => WorktreeDialog::remove_worktree(&self.tabs[j].ws.local, &self.tabs[j].ws.remote, true),
+            None => {
+                let folder = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let remote = crate::worktree::sibling_remote(&self.tabs[i].ws.remote, &folder);
+                WorktreeDialog::remove_worktree(&path.display().to_string(), &remote, false)
+            }
+        };
+        self.tabs[i].worktree = Some(dialog);
+    }
+
     fn worktree_dialog(&mut self, ctx: &egui::Context, i: usize) {
+        let target = match &self.tabs[i].worktree {
+            Some(WorktreeDialog::Remove(form)) => self.tab_of_folder(Path::new(&form.local)),
+            _ => Some(i),
+        };
+        let pending = target.and_then(|j| self.tabs[j].pending()).unwrap_or(0);
+        let unsaved = target.and_then(|j| self.tabs[j].edit.as_ref().filter(|ed| ed.dirty()).map(|ed| ed.path.clone()));
         let tab = &mut self.tabs[i];
-        let pending = tab.pending().unwrap_or(0);
-        let unsaved = tab.edit.as_ref().filter(|ed| ed.dirty()).map(|ed| ed.path.clone());
         let Some(dialog) = tab.worktree.as_mut() else { return };
         let outcome = worktree_dialog_ui(ctx, dialog, &tab.ws, pending, unsaved.as_deref());
         match outcome {
             WorktreeOutcome::Open => {}
             WorktreeOutcome::Closed => self.tabs[i].worktree = None,
-            WorktreeOutcome::Created(ws) => {
+            WorktreeOutcome::Started { ws, job } => {
                 self.tabs[i].worktree = None;
-                let shown = match self.tabs.iter().position(|t| t.ws.local == ws.local && t.ws.remote == ws.remote) {
-                    Some(j) => j,
-                    None => {
-                        self.tabs.insert(i + 1, Tab::open(ws, ctx));
-                        i + 1
-                    }
-                };
-                self.active = Some(shown);
+                self.tabs.insert(i + 1, Tab::creating(ws, job));
+                self.active = Some(i + 1);
             }
-            WorktreeOutcome::Remove { delete_remote } => self.remove_worktree_tab(ctx, i, delete_remote),
+            WorktreeOutcome::RunInTerminal(command) => {
+                let tab = &mut self.tabs[i];
+                tab.worktree = None;
+                tab.terminals.run_in_new_shell(&mut tab.ws.sessions, TermKind::Local, command);
+                self.options.layout.terminal_shown = true;
+            }
+            WorktreeOutcome::Remove { local, remote, delete_remote } => {
+                self.tabs[i].worktree = None;
+                self.remove_worktree(local, remote, delete_remote);
+            }
         }
     }
 
-    fn remove_worktree_tab(&mut self, ctx: &egui::Context, i: usize, delete_remote: bool) {
-        let ws = self.tabs[i].ws.clone();
-        let places = workspace_data_places(&ws);
-        self.tabs.remove(i);
-        let errors = wipe_workspace_data(&places);
-        self.active = self.active_after_removing(i);
-        self.report_close_errors(&errors);
-        let (tx, rx) = mpsc::channel();
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let removed = Remote::parse(&ws.remote).and_then(|remote| crate::worktree::remove(Path::new(&ws.local), &remote, delete_remote));
-            let _ = tx.send(removed.map(|()| ws.title()).map_err(|e| format!("Removing the worktree {} failed: {e:#}", ws.title())));
-            ctx.request_repaint();
-        });
-        self.removals.push(rx);
+    fn remove_worktree(&mut self, local: String, remote: String, delete_remote: bool) {
+        let planned = Remote::parse(&remote).and_then(|r| crate::worktree::removal(Path::new(&local), &r, delete_remote));
+        let removal = match planned {
+            Ok(removal) => removal,
+            Err(e) => return self.tell_active(true, format!("The worktree {local} is not removed: {e:#}")),
+        };
+        match self.tab_of_folder(Path::new(&local)) {
+            Some(j) => self.close_tab(j),
+            None => {
+                let places = Remote::parse(&remote).map(|r| crate::engine::workspace_state_dirs(&local, &r)).unwrap_or_default();
+                let errors = wipe_workspace_data(&places);
+                self.report_close_errors(&errors);
+            }
+        }
+        let Some(host) = self.tab_of_folder(&removal.main).or(self.active) else {
+            return eprintln!("no workspace tab left to run: {}", removal.command);
+        };
+        let tab = &mut self.tabs[host];
+        tab.terminals.run_in_new_shell(&mut tab.ws.sessions, TermKind::Local, removal.command);
+        self.options.layout.terminal_shown = true;
+        self.active = Some(host);
     }
 
-    fn report_finished_removals(&mut self) {
-        let mut finished = Vec::new();
-        self.removals.retain(|rx| match rx.try_recv() {
-            Ok(result) => {
-                finished.push(result);
-                false
-            }
-            Err(mpsc::TryRecvError::Empty) => true,
-            Err(mpsc::TryRecvError::Disconnected) => false,
-        });
-        for result in finished {
-            let message = match result {
-                Ok(title) => (false, format!("Worktree {title} removed")),
-                Err(e) => (true, e),
-            };
-            match self.active.and_then(|a| self.tabs[a].session.as_ref()) {
-                Some(session) => session.shared.lock().unwrap().message = Some(message),
-                None => eprintln!("{}", message.1),
-            }
+    fn tell_active(&self, error: bool, text: String) {
+        match self.active.and_then(|a| self.tabs[a].session.as_ref()) {
+            Some(session) => session.shared.lock().unwrap().message = Some((error, text)),
+            None => eprintln!("{text}"),
         }
     }
 

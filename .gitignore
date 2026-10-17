@@ -29,6 +29,5 @@ rustc-ice-*.txt
 /target
 
 /.idea/
-/Cargo.lock
 /upload_to_claude.sh
 /.agent-diff/

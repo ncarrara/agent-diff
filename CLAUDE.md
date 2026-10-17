@@ -5,10 +5,12 @@ is working, review what changed, and sync whole files or single hunks between
 it and a local git workspace, in both directions. Each local/remote pair is a
 workspace tab, with an embedded terminal running `claude` on the remote.
 
-See `README.md` for user-facing behavior; keep it up to date when behavior changes.
+See `README.md` for user-facing behavior.
 
 ## Rules
 
+- **Don't touch `README.md`** unless absolutely necessary (a feature it describes is gone or
+  works differently). Then change at most a line or two, keeping it short.
 - **Never write comments.** No `//`, `///` or `//!` comments in code you add or
   change. Use clear names and small functions instead.
 - **Don't run the tests, don't build** (no `cargo test`, `cargo build`, `cargo check`): the

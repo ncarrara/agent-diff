@@ -19,7 +19,6 @@ pub(super) enum Cmd {
     Sync { path: String, version: u64, origin: Origin, rename: Option<Rename> },
     OpenGitignored(Vec<String>),
     AddToGitignore(String),
-    Commit { repos: Vec<String>, message: String, push: bool },
     SaveRemote(RemoteSave),
 }
 
@@ -376,31 +375,6 @@ pub(super) fn worker(engine: Engine, rx: Receiver<Cmd>, shared: Arc<Mutex<Shared
                 Cmd::Refresh => {
                     scan();
                     last_fetch = None;
-                }
-                Cmd::Commit { mut repos, message, push } => {
-                    set(&|s| s.busy = true);
-                    crate::engine::deepest_first(&mut repos);
-                    let results: Vec<String> = repos
-                        .iter()
-                        .map(|repo| {
-                            let name = if repo.is_empty() { "(workspace root)" } else { repo };
-                            let root = &engine.local_root;
-                            match crate::engine::commit(root, repo, &message) {
-                                Err(e) => format!("commit failed in {name}: {e:#}"),
-                                Ok(hash) if !push => format!("committed {hash} in {name}"),
-                                Ok(hash) => match crate::engine::push_repo(root, repo) {
-                                    Ok(()) => format!("committed {hash} and pushed in {name}"),
-                                    Err(e) => format!("push failed in {name} (committed {hash}): {e:#}"),
-                                },
-                            }
-                        })
-                        .collect();
-                    let failed = results.iter().any(|r| r.contains(" failed in "));
-                    set(&|s| {
-                        s.busy = false;
-                        s.message = Some((failed, results.join("\n")));
-                    });
-                    dirty = true;
                 }
                 Cmd::SaveRemote(save) => {
                     set(&|s| s.busy = true);

@@ -151,24 +151,6 @@ pub fn uncommitted(local_root: &Path) -> Result<Vec<RepoChanges>> {
     Ok(changes)
 }
 
-pub fn commit(local_root: &Path, repo: &str, message: &str) -> Result<String> {
-    let dir = local_root.join(repo);
-    git_at(&dir, &["commit", "-a", "-q", "-m", message])?;
-    let hash = git_at(&dir, &["rev-parse", "--short", "HEAD"])?;
-    Ok(String::from_utf8_lossy(&hash).trim().to_string())
-}
-
-pub fn push_repo(local_root: &Path, repo: &str) -> Result<()> {
-    let dir = local_root.join(repo);
-    match git_at(&dir, &["push", "-q"]) {
-        Err(e) if e.to_string().contains("no upstream branch") => {
-            let branch = branch(&dir).context("no branch to push")?;
-            git_at(&dir, &["push", "-q", "--set-upstream", "origin", &branch]).map(|_| ())
-        }
-        result => result.map(|_| ()),
-    }
-}
-
 pub fn deepest_first(repos: &mut [String]) {
     repos.sort_by_key(|r| std::cmp::Reverse(if r.is_empty() { 0 } else { r.split('/').count() }));
 }
@@ -1748,8 +1730,12 @@ pub fn workspace_id(local_root: &Path, remote: &Remote) -> String {
     format!("{:016x}", fnv(&[key.as_bytes()]))
 }
 
+pub fn workspaces_dir() -> PathBuf {
+    app_dir().join("workspaces")
+}
+
 pub fn state_dir_of(local_root: &Path, remote: &Remote) -> PathBuf {
-    app_dir().join("workspaces").join(workspace_id(local_root, remote))
+    workspaces_dir().join(workspace_id(local_root, remote))
 }
 
 pub fn workspace_state_dirs(local: &str, remote: &Remote) -> Vec<PathBuf> {
@@ -2088,7 +2074,7 @@ mod tests {
     }
 
     #[test]
-    fn commit_and_push_each_repository() {
+    fn lists_uncommitted_changes_per_repository() {
         let root = std::env::temp_dir().join(format!("agent-diff-test-commit-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let local = root.join("local");
@@ -2110,8 +2096,6 @@ mod tests {
             git(&dir, &[&ident[..], &["commit", "-qm", "init"]].concat());
         }
         fs::write(local.join(".gitignore"), "lib/\n").unwrap();
-        git(&root, &["init", "-q", "--bare", "origin.git"]);
-        git(&local.join("lib"), &["remote", "add", "origin", root.join("origin.git").to_str().unwrap()]);
 
         assert!(uncommitted(&local).unwrap().is_empty());
         fs::write(local.join("lib/a.txt"), "2\n").unwrap();
@@ -2127,20 +2111,6 @@ mod tests {
         assert_eq!(summary[0], ("".into(), vec![pair("M", "a.txt")]));
         assert_eq!(summary[1], ("lib".into(), vec![pair("M", "lib/a.txt"), pair("D", "lib/gone.txt"), pair("A", "lib/new.txt")]));
         assert_eq!(changes[1].repo.branch.as_deref(), Some("main"));
-
-        let hash = commit(&local, "lib", "lib work").unwrap();
-        assert_eq!(git(&local.join("lib"), &["rev-parse", "--short", "HEAD"]).trim(), hash);
-        assert_eq!(git(&local.join("lib"), &["ls-files"]), "a.txt\nnew.txt\n");
-        push_repo(&local, "lib").unwrap();
-        assert_eq!(git(&root.join("origin.git"), &["log", "-1", "--format=%s", "main"]).trim(), "lib work");
-        fs::write(local.join("lib/a.txt"), "3\n").unwrap();
-        commit(&local, "lib", "again").unwrap();
-        push_repo(&local, "lib").unwrap();
-        assert_eq!(git(&root.join("origin.git"), &["log", "-1", "--format=%s", "main"]).trim(), "again");
-
-        assert!(push_repo(&local, "").is_err());
-        assert!(commit(&local, "lib", "nothing").is_err());
-        assert_eq!(uncommitted(&local).unwrap().len(), 1);
     }
 
     #[test]

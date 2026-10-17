@@ -1236,6 +1236,11 @@ impl Terminals {
         self.paste = Some(text);
     }
 
+    pub(super) fn run_in_new_shell(&mut self, sessions: &mut Vec<TermTab>, kind: TermKind, command: String) {
+        self.open_new(sessions, kind);
+        self.command = Some(command);
+    }
+
     pub(super) fn run_in_shell(&mut self, sessions: &mut Vec<TermTab>, kind: TermKind, command: String) {
         self.show_kind(sessions, kind);
         self.command = Some(command);

@@ -305,6 +305,7 @@ pub(super) struct Tab {
     pub(super) editing: Option<EditForm>,
     pub(super) worktree: Option<WorktreeDialog>,
     pub(super) linked_worktree: bool,
+    pub(super) creating: Option<Creating>,
     /// The selected unchanged file, read from disk for display.
     pub(super) unchanged: Option<FileEntry>,
     /// The Claude terminals, started when first shown.
@@ -397,10 +398,14 @@ impl Tab {
 
 impl Tab {
     pub(super) fn open(ws: Workspace, ctx: &egui::Context) -> Self {
-        let linked_worktree = crate::worktree::is_linked(Path::new(&ws.local));
-        let mut tab = Tab { ws, session: None, error: None, selected: None, order: Vec::new(), jumped_to: None, hl: None, hl_job: None, confirm: None, editing: None, worktree: None, linked_worktree, unchanged: None, terminals: Terminals::default(), explorer_min_widths: [0.0; 2], confirm_delete: None, new_file: None, rename_file: None, confirm_delete_folder: None, confirm_delete_ignored: None, rename_folder: None, edit: None, change: ChangeFocus::default(), explorers: Default::default(), searched_in: ExplorerKind::Files, commit: None, preview: None, hex: None, runner: None, git_log: GitLog::default(), definition: GoToDefinition::default(), quick_open: None, new_terminal: None, find: None, file_tabs: FileTabs::default(), show_source: false, source_of: None, panes: Panes::default(), layout: Layout::default() };
+        let mut tab = Tab::new(ws);
         tab.start(ctx);
         tab
+    }
+
+    pub(super) fn new(ws: Workspace) -> Self {
+        let linked_worktree = crate::worktree::is_linked(Path::new(&ws.local));
+        Tab { ws, session: None, error: None, selected: None, order: Vec::new(), jumped_to: None, hl: None, hl_job: None, confirm: None, editing: None, worktree: None, linked_worktree, creating: None, unchanged: None, terminals: Terminals::default(), explorer_min_widths: [0.0; 2], confirm_delete: None, new_file: None, rename_file: None, confirm_delete_folder: None, confirm_delete_ignored: None, rename_folder: None, edit: None, change: ChangeFocus::default(), explorers: Default::default(), searched_in: ExplorerKind::Files, commit: None, preview: None, hex: None, runner: None, git_log: GitLog::default(), definition: GoToDefinition::default(), quick_open: None, new_terminal: None, find: None, file_tabs: FileTabs::default(), show_source: false, source_of: None, panes: Panes::default(), layout: Layout::default() }
     }
 
     pub(super) fn start(&mut self, ctx: &egui::Context) {
@@ -425,6 +430,9 @@ impl Tab {
 
     /// Number of files that differ, if the session is running.
     pub(super) fn running_action(&self) -> Option<String> {
+        if let Some(job) = self.creating.as_ref().filter(|job| job.running()) {
+            return Some(format!("creating the worktree {}", job.branch()));
+        }
         let shared = self.session.as_ref()?.shared.lock().unwrap();
         shared.busy.then(|| match &shared.progress {
             Some(p) => format!("{} · {:.0}%", p.step, p.fraction * 100.0),
